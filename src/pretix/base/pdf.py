@@ -83,9 +83,7 @@ from pretix.base.templatetags.money import money_filter
 from pretix.base.templatetags.phone_format import phone_format
 from pretix.helpers.daterange import datetimerange
 from pretix.helpers.reportlab import (
-    ThumbnailingImageReader,
-    register_ttf_font_if_new,
-    reshaper,
+    ThumbnailingImageReader, register_ttf_font_if_new, reshaper,
 )
 from pretix.presale.style import get_fonts
 
@@ -95,823 +93,470 @@ if not settings.DEBUG:
     reportlab.rl_config.shapeChecking = 0
 
 
-DEFAULT_VARIABLES = OrderedDict(
-    (
-        (
-            "secret",
-            {
-                "label": _("Ticket code (barcode content)"),
-                "editor_sample": "tdmruoekvkpbv1o2mv8xccvqcikvr58u",
-                "evaluate": lambda orderposition, order, event: (
-                    orderposition.secret[:30] + "…"
-                    if len(orderposition.secret) > 32
-                    else orderposition.secret
-                ),
-            },
-        ),
-        (
-            "order",
-            {
-                "label": _("Order code"),
-                "editor_sample": "A1B2C",
-                "evaluate": lambda orderposition, order, event: (
-                    orderposition.order.code
-                ),
-            },
-        ),
-        (
-            "positionid",
-            {
-                "label": _("Order position number"),
-                "editor_sample": "1",
-                "evaluate": lambda orderposition, order, event: str(
-                    orderposition.positionid
-                ),
-                # There is no performance gain in using evaluate_bulk here, but we want to make sure it is used somewhere
-                # in core to make sure we notice if the implementation of the API breaks.
-                "evaluate_bulk": lambda orderpositions: [
-                    str(p.positionid) for p in orderpositions
-                ],
-            },
-        ),
-        (
-            "order_positionid",
-            {
-                "label": _("Order code and position number"),
-                "editor_sample": "A1B2C-1",
-                "evaluate": lambda orderposition, order, event: (
-                    f"{orderposition.order.code}-{orderposition.positionid}"
-                ),
-            },
-        ),
-        (
-            "item",
-            {
-                "label": _("Product name"),
-                "editor_sample": _("Sample product"),
-                "evaluate": lambda orderposition, order, event: str(
-                    orderposition.item.name
-                ),
-            },
-        ),
-        (
-            "variation",
-            {
-                "label": _("Variation name"),
-                "editor_sample": _("Sample variation"),
-                "evaluate": lambda op, order, event: (
-                    str(op.variation) if op.variation else ""
-                ),
-            },
-        ),
-        (
-            "item_description",
-            {
-                "label": _("Product description"),
-                "editor_sample": _("Sample product description"),
-                "evaluate": lambda orderposition, order, event: str(
-                    orderposition.item.description
-                ),
-            },
-        ),
-        (
-            "itemvar",
-            {
-                "label": _("Product name and variation"),
-                "editor_sample": _("Sample product – sample variation"),
-                "evaluate": lambda orderposition, order, event: (
-                    "{} - {}".format(orderposition.item.name, orderposition.variation)
-                    if orderposition.variation
-                    else str(orderposition.item.name)
-                ),
-            },
-        ),
-        (
-            "itemvar_description",
-            {
-                "label": _("Product variation description"),
-                "editor_sample": _("Sample product variation description"),
-                "evaluate": lambda orderposition, order, event: (
-                    str(orderposition.variation.description)
-                    if orderposition.variation
-                    else str(orderposition.item.description)
-                ),
-            },
-        ),
-        (
-            "item_category",
-            {
-                "label": _("Product category"),
-                "editor_sample": _("Ticket category"),
-                "evaluate": lambda orderposition, order, event: (
-                    str(orderposition.item.category.name)
-                    if orderposition.item.category
-                    else ""
-                ),
-            },
-        ),
-        (
-            "price",
-            {
-                "label": _("Price"),
-                "editor_sample": _("123.45 EUR"),
-                "evaluate": lambda op, order, event: money_filter(
-                    op.price, event.currency
-                ),
-            },
-        ),
-        (
-            "price_with_bundled",
-            {
-                "label": _("Price including bundled products"),
-                "editor_sample": _("123.45 EUR"),
-                "evaluate": lambda op, order, event: money_filter(
-                    op.price
-                    + sum(
-                        p.price
-                        for p in op.addons.all()
-                        if not p.canceled and p.is_bundled
-                    ),
-                    event.currency,
-                ),
-            },
-        ),
-        (
-            "price_with_addons",
-            {
-                "label": _("Price including add-ons and bundled products"),
-                "editor_sample": _("123.45 EUR"),
-                "evaluate": lambda op, order, event: money_filter(
-                    op.price + sum(p.price for p in op.addons.all() if not p.canceled),
-                    event.currency,
-                ),
-            },
-        ),
-        (
-            "attendee_name",
-            {
-                "label": _("Attendee name"),
-                "editor_sample": _("John Doe"),
-                "evaluate": lambda op, order, ev: (
-                    op.attendee_name
-                    or (op.addon_to.attendee_name if op.addon_to else "")
-                ),
-            },
-        ),
-        (
-            "attendee_company",
-            {
-                "label": _("Attendee company"),
-                "editor_sample": _("Sample company"),
-                "evaluate": lambda op, order, ev: (
-                    op.company or (op.addon_to.company if op.addon_to else "")
-                ),
-            },
-        ),
-        (
-            "attendee_address",
-            {
-                "label": _("Full attendee address"),
-                "editor_sample": _(
-                    "John Doe\nSample company\nSesame Street 42\n12345 Any City\nAtlantis"
-                ),
-                "evaluate": lambda op, order, event: op.address_format(),
-            },
-        ),
-        (
-            "attendee_street",
-            {
-                "label": _("Attendee street"),
-                "editor_sample": "Sesame Street 42",
-                "evaluate": lambda op, order, ev: (
-                    op.street or (op.addon_to.street if op.addon_to else "")
-                ),
-            },
-        ),
-        (
-            "attendee_zipcode",
-            {
-                "label": _("Attendee ZIP code"),
-                "editor_sample": "12345",
-                "evaluate": lambda op, order, ev: (
-                    op.zipcode or (op.addon_to.zipcode if op.addon_to else "")
-                ),
-            },
-        ),
-        (
-            "attendee_city",
-            {
-                "label": _("Attendee city"),
-                "editor_sample": "Any City",
-                "evaluate": lambda op, order, ev: (
-                    op.city or (op.addon_to.city if op.addon_to else "")
-                ),
-            },
-        ),
-        (
-            "attendee_state",
-            {
-                "label": _("Attendee state"),
-                "editor_sample": "Sample State",
-                "evaluate": lambda op, order, ev: (
-                    op.state or (op.addon_to.state if op.addon_to else "")
-                ),
-            },
-        ),
-        (
-            "attendee_country",
-            {
-                "label": _("Attendee country"),
-                "editor_sample": "Atlantis",
-                "evaluate": lambda op, order, ev: (
-                    str(getattr(op.country, "name", ""))
-                    or (
-                        str(getattr(op.addon_to.country, "name", ""))
-                        if op.addon_to
-                        else ""
-                    )
-                ),
-            },
-        ),
-        (
-            "attendee_email",
-            {
-                "label": _("Attendee email"),
-                "editor_sample": "foo@bar.com",
-                "evaluate": lambda op, order, ev: (
-                    op.attendee_email
-                    or (op.addon_to.attendee_email if op.addon_to else "")
-                ),
-            },
-        ),
-        (
-            "pseudonymization_id",
-            {
-                "label": _("Pseudonymization ID (lead scanning)"),
-                "editor_sample": "GG89JUJDTA",
-                "evaluate": lambda orderposition, order, event: (
-                    orderposition.pseudonymization_id
-                ),
-            },
-        ),
-        (
-            "event_name",
-            {
-                "label": _("Event name"),
-                "editor_sample": _("Sample event name"),
-                "evaluate": lambda op, order, ev: str(ev.name),
-            },
-        ),
-        (
-            "event_series_name",
-            {
-                "label": _("Event series"),
-                "editor_sample": _("Sample event name"),
-                "evaluate": lambda op, order, ev: str(order.event.name),
-            },
-        ),
-        (
-            "event_date",
-            {
-                "label": _("Event date"),
-                "editor_sample": _("May 31st, 2017"),
-                "evaluate": lambda op, order, ev: ev.get_date_from_display(
-                    show_times=False
-                ),
-            },
-        ),
-        (
-            "event_date_range",
-            {
-                "label": _("Event date range"),
-                "editor_sample": _("May 31st – June 4th, 2017"),
-                "evaluate": lambda op, order, ev: ev.get_date_range_display(
-                    force_show_end=True
-                ),
-            },
-        ),
-        (
-            "event_begin",
-            {
-                "label": _("Event begin date and time"),
-                "editor_sample": _("2017-05-31 20:00"),
-                "evaluate": lambda op, order, ev: (
-                    date_format(
-                        ev.date_from.astimezone(ev.timezone), "SHORT_DATETIME_FORMAT"
-                    )
-                    if ev.date_from
-                    else ""
-                ),
-            },
-        ),
-        (
-            "event_begin_date",
-            {
-                "label": _("Event begin date"),
-                "editor_sample": _("2017-05-31"),
-                "evaluate": lambda op, order, ev: (
-                    date_format(
-                        ev.date_from.astimezone(ev.timezone), "SHORT_DATE_FORMAT"
-                    )
-                    if ev.date_from
-                    else ""
-                ),
-            },
-        ),
-        (
-            "event_begin_time",
-            {
-                "label": _("Event begin time"),
-                "editor_sample": _("20:00"),
-                "evaluate": lambda op, order, ev: ev.get_time_from_display(),
-            },
-        ),
-        (
-            "event_begin_weekday",
-            {
-                "label": _("Event begin weekday"),
-                "editor_sample": _("Friday"),
-                "evaluate": lambda op, order, ev: ev.get_weekday_from_display(),
-            },
-        ),
-        (
-            "event_end",
-            {
-                "label": _("Event end date and time"),
-                "editor_sample": _("2017-05-31 22:00"),
-                "evaluate": lambda op, order, ev: (
-                    date_format(
-                        ev.date_to.astimezone(ev.timezone), "SHORT_DATETIME_FORMAT"
-                    )
-                    if ev.date_to
-                    else ""
-                ),
-            },
-        ),
-        (
-            "event_end_date",
-            {
-                "label": _("Event end date"),
-                "editor_sample": _("2017-05-31"),
-                "evaluate": lambda op, order, ev: (
-                    date_format(ev.date_to.astimezone(ev.timezone), "SHORT_DATE_FORMAT")
-                    if ev.date_to
-                    else ""
-                ),
-            },
-        ),
-        (
-            "event_end_time",
-            {
-                "label": _("Event end time"),
-                "editor_sample": _("22:00"),
-                "evaluate": lambda op, order, ev: (
-                    date_format(ev.date_to.astimezone(ev.timezone), "TIME_FORMAT")
-                    if ev.date_to
-                    else ""
-                ),
-            },
-        ),
-        (
-            "event_end_weekday",
-            {
-                "label": _("Event end weekday"),
-                "editor_sample": _("Friday"),
-                "evaluate": lambda op, order, ev: ev.get_weekday_to_display(),
-            },
-        ),
-        (
-            "event_admission",
-            {
-                "label": _("Event admission date and time"),
-                "editor_sample": _("2017-05-31 19:00"),
-                "evaluate": lambda op, order, ev: (
-                    date_format(
-                        ev.date_admission.astimezone(ev.timezone),
-                        "SHORT_DATETIME_FORMAT",
-                    )
-                    if ev.date_admission
-                    else ""
-                ),
-            },
-        ),
-        (
-            "event_admission_time",
-            {
-                "label": _("Event admission time"),
-                "editor_sample": _("19:00"),
-                "evaluate": lambda op, order, ev: (
-                    date_format(
-                        ev.date_admission.astimezone(ev.timezone), "TIME_FORMAT"
-                    )
-                    if ev.date_admission
-                    else ""
-                ),
-            },
-        ),
-        (
-            "event_location",
-            {
-                "label": _("Event location"),
-                "editor_sample": _("Random City"),
-                "evaluate": lambda op, order, ev: str(ev.location),
-            },
-        ),
-        (
-            "telephone",
-            {
-                "label": _("Phone number"),
-                "editor_sample": "+01 1234 567890",
-                "evaluate": lambda op, order, ev: phone_format(order.phone, html=False),
-            },
-        ),
-        (
-            "email",
-            {
-                "label": _("Email"),
-                "editor_sample": "foo@bar.com",
-                "evaluate": lambda op, order, ev: order.email,
-            },
-        ),
-        (
-            "invoice_name",
-            {
-                "label": _("Invoice address name"),
-                "editor_sample": _("John Doe"),
-                "evaluate": lambda op, order, ev: (
-                    order.invoice_address.name
-                    if getattr(order, "invoice_address", None)
-                    else ""
-                ),
-            },
-        ),
-        (
-            "invoice_company",
-            {
-                "label": _("Invoice address company"),
-                "editor_sample": _("Sample company"),
-                "evaluate": lambda op, order, ev: (
-                    order.invoice_address.company
-                    if getattr(order, "invoice_address", None)
-                    else ""
-                ),
-            },
-        ),
-        (
-            "invoice_street",
-            {
-                "label": _("Invoice address street"),
-                "editor_sample": _("Sesame Street 42"),
-                "evaluate": lambda op, order, ev: (
-                    order.invoice_address.street
-                    if getattr(order, "invoice_address", None)
-                    else ""
-                ),
-            },
-        ),
-        (
-            "invoice_zipcode",
-            {
-                "label": _("Invoice address ZIP code"),
-                "editor_sample": _("12345"),
-                "evaluate": lambda op, order, ev: (
-                    order.invoice_address.zipcode
-                    if getattr(order, "invoice_address", None)
-                    else ""
-                ),
-            },
-        ),
-        (
-            "invoice_city",
-            {
-                "label": _("Invoice address city"),
-                "editor_sample": _("Sample city"),
-                "evaluate": lambda op, order, ev: (
-                    order.invoice_address.city
-                    if getattr(order, "invoice_address", None)
-                    else ""
-                ),
-            },
-        ),
-        (
-            "invoice_state",
-            {
-                "label": _("Invoice address state"),
-                "editor_sample": _("Sample State"),
-                "evaluate": lambda op, order, ev: (
-                    order.invoice_address.state
-                    if getattr(order, "invoice_address", None)
-                    else ""
-                ),
-            },
-        ),
-        (
-            "invoice_country",
-            {
-                "label": _("Invoice address country"),
-                "editor_sample": _("Atlantis"),
-                "evaluate": lambda op, order, ev: (
-                    str(getattr(order.invoice_address.country, "name", ""))
-                    if getattr(order, "invoice_address", None)
-                    else ""
-                ),
-            },
-        ),
-        (
-            "addons",
-            {
-                "label": _("List of Add-Ons"),
-                "editor_sample": _("Add-on 1\n2x Add-on 2"),
-                "evaluate": lambda op, order, ev: "\n".join(
-                    [str(p) for p in generate_compressed_addon_list(op, order, ev)]
-                ),
-            },
-        ),
-        (
-            "organizer",
-            {
-                "label": _("Organizer name"),
-                "editor_sample": _("Event organizer company"),
-                "evaluate": lambda op, order, ev: str(order.event.organizer.name),
-            },
-        ),
-        (
-            "organizer_info_text",
-            {
-                "label": _("Organizer info text"),
-                "editor_sample": _("Event organizer info text"),
-                "evaluate": lambda op, order, ev: str(
-                    order.event.settings.organizer_info_text
-                ),
-            },
-        ),
-        (
-            "event_info_text",
-            {
-                "label": _("Event info text"),
-                "editor_sample": _("Event info text"),
-                "evaluate": lambda op, order, ev: str(
-                    order.event.settings.event_info_text
-                ),
-            },
-        ),
-        (
-            "now_date",
-            {
-                "label": _("Printing date"),
-                "editor_sample": _("2017-05-31"),
-                "evaluate": lambda op, order, ev: date_format(
-                    now().astimezone(ev.timezone), "SHORT_DATE_FORMAT"
-                ),
-            },
-        ),
-        (
-            "now_datetime",
-            {
-                "label": _("Printing date and time"),
-                "editor_sample": _("2017-05-31 19:00"),
-                "evaluate": lambda op, order, ev: date_format(
-                    now().astimezone(ev.timezone), "SHORT_DATETIME_FORMAT"
-                ),
-            },
-        ),
-        (
-            "now_time",
-            {
-                "label": _("Printing time"),
-                "editor_sample": _("19:00"),
-                "evaluate": lambda op, order, ev: date_format(
-                    now().astimezone(ev.timezone), "TIME_FORMAT"
-                ),
-            },
-        ),
-        (
-            "purchase_date",
-            {
-                "label": _("Purchase date"),
-                "editor_sample": _("2017-05-31"),
-                "evaluate": lambda op, order, ev: date_format(
-                    order.datetime.astimezone(ev.timezone), "SHORT_DATE_FORMAT"
-                ),
-            },
-        ),
-        (
-            "purchase_datetime",
-            {
-                "label": _("Purchase date and time"),
-                "editor_sample": _("2017-05-31 19:00"),
-                "evaluate": lambda op, order, ev: date_format(
-                    order.datetime.astimezone(ev.timezone), "SHORT_DATETIME_FORMAT"
-                ),
-            },
-        ),
-        (
-            "purchase_time",
-            {
-                "label": _("Purchase time"),
-                "editor_sample": _("19:00"),
-                "evaluate": lambda op, order, ev: date_format(
-                    order.datetime.astimezone(ev.timezone), "TIME_FORMAT"
-                ),
-            },
-        ),
-        (
-            "valid_from_date",
-            {
-                "label": _("Validity start date"),
-                "editor_sample": _("2017-05-31"),
-                "evaluate": lambda op, order, ev: (
-                    date_format(
-                        op.valid_from.astimezone(ev.timezone), "SHORT_DATE_FORMAT"
-                    )
-                    if op.valid_from
-                    else ""
-                ),
-            },
-        ),
-        (
-            "valid_from_datetime",
-            {
-                "label": _("Validity start date and time"),
-                "editor_sample": _("2017-05-31 19:00"),
-                "evaluate": lambda op, order, ev: (
-                    date_format(
-                        op.valid_from.astimezone(ev.timezone), "SHORT_DATETIME_FORMAT"
-                    )
-                    if op.valid_from
-                    else ""
-                ),
-            },
-        ),
-        (
-            "valid_from_time",
-            {
-                "label": _("Validity start time"),
-                "editor_sample": _("19:00"),
-                "evaluate": lambda op, order, ev: (
-                    date_format(op.valid_from.astimezone(ev.timezone), "TIME_FORMAT")
-                    if op.valid_from
-                    else ""
-                ),
-            },
-        ),
-        (
-            "valid_until_date",
-            {
-                "label": _("Validity end date"),
-                "editor_sample": _("2017-05-31"),
-                "evaluate": lambda op, order, ev: (
-                    date_format(
-                        op.valid_until.astimezone(ev.timezone), "SHORT_DATE_FORMAT"
-                    )
-                    if op.valid_until
-                    else ""
-                ),
-            },
-        ),
-        (
-            "valid_until_datetime",
-            {
-                "label": _("Validity end date and time"),
-                "editor_sample": _("2017-05-31 19:00"),
-                "evaluate": lambda op, order, ev: (
-                    date_format(
-                        op.valid_until.astimezone(ev.timezone), "SHORT_DATETIME_FORMAT"
-                    )
-                    if op.valid_until
-                    else ""
-                ),
-            },
-        ),
-        (
-            "valid_until_time",
-            {
-                "label": _("Validity end time"),
-                "editor_sample": _("19:00"),
-                "evaluate": lambda op, order, ev: (
-                    date_format(op.valid_until.astimezone(ev.timezone), "TIME_FORMAT")
-                    if op.valid_until
-                    else ""
-                ),
-            },
-        ),
-        (
-            "program_times",
-            {
-                "label": _("Program times: date and time"),
-                "editor_sample": _(
-                    "2017-05-31 10:00 – 12:00\n2017-05-31 14:00 – 16:00\n2017-05-31 14:00 – 2017-06-01 14:00"
-                ),
-                "evaluate": lambda op, order, ev: get_program_times(op, ev),
-            },
-        ),
-        (
-            "medium_identifier",
-            {
-                "label": _("Reusable Medium ID"),
-                "editor_sample": "ABC1234DEF4567",
-                "evaluate": lambda op, order, ev: (
-                    op.linked_media.all()[0].identifier if op.linked_media.all() else ""
-                ),
-            },
-        ),
-        (
-            "seat",
-            {
-                "label": _("Seat: Full name"),
-                "editor_sample": _("Ground floor, Row 3, Seat 4"),
-                "evaluate": lambda op, order, ev: str(
-                    get_seat(op)
-                    if get_seat(op)
-                    else _("General admission")
-                    if ev.seating_plan_id is not None
-                    else ""
-                ),
-            },
-        ),
-        (
-            "seat_zone",
-            {
-                "label": _("Seat: zone"),
-                "editor_sample": _("Ground floor"),
-                "evaluate": lambda op, order, ev: str(
-                    get_seat(op).zone_name
-                    if get_seat(op)
-                    else _("General admission")
-                    if ev.seating_plan_id is not None
-                    else ""
-                ),
-            },
-        ),
-        (
-            "seat_row",
-            {
-                "label": _("Seat: row"),
-                "editor_sample": "3",
-                "evaluate": lambda op, order, ev: str(
-                    get_seat(op).row_name if get_seat(op) else ""
-                ),
-            },
-        ),
-        (
-            "seat_number",
-            {
-                "label": _("Seat: seat number"),
-                "editor_sample": 4,
-                "evaluate": lambda op, order, ev: str(
-                    get_seat(op).seat_number if get_seat(op) else ""
-                ),
-            },
-        ),
-        (
-            "first_scan",
-            {
-                "label": _("Date and time of first scan"),
-                "editor_sample": _("2017-05-31 19:00"),
-                "evaluate": lambda op, order, ev: get_first_scan(op),
-            },
-        ),
-        (
-            "giftcard_issuance_date",
-            {
-                "label": _("Gift card: Issuance date"),
-                "editor_sample": _("2017-05-31"),
-                "evaluate": lambda op, order, ev: get_giftcard_issuance(op, ev),
-            },
-        ),
-        (
-            "giftcard_expiry_date",
-            {
-                "label": _("Gift card: Expiration date"),
-                "editor_sample": _("2017-05-31"),
-                "evaluate": lambda op, order, ev: get_giftcard_expiry(op, ev),
-            },
-        ),
-    )
-)
+DEFAULT_VARIABLES = OrderedDict((
+    ("secret", {
+        "label": _("Ticket code (barcode content)"),
+        "editor_sample": "tdmruoekvkpbv1o2mv8xccvqcikvr58u",
+        "evaluate": lambda orderposition, order, event: (
+            orderposition.secret[:30] + "…" if len(orderposition.secret) > 32 else orderposition.secret
+        )
+    }),
+    ("order", {
+        "label": _("Order code"),
+        "editor_sample": "A1B2C",
+        "evaluate": lambda orderposition, order, event: orderposition.order.code
+    }),
+    ("positionid", {
+        "label": _("Order position number"),
+        "editor_sample": "1",
+        "evaluate": lambda orderposition, order, event: str(orderposition.positionid),
+        # There is no performance gain in using evaluate_bulk here, but we want to make sure it is used somewhere
+        # in core to make sure we notice if the implementation of the API breaks.
+        "evaluate_bulk": lambda orderpositions: [str(p.positionid) for p in orderpositions],
+    }),
+    ("order_positionid", {
+        "label": _("Order code and position number"),
+        "editor_sample": "A1B2C-1",
+        "evaluate": lambda orderposition, order, event: f"{orderposition.order.code}-{orderposition.positionid}"
+    }),
+    ("item", {
+        "label": _("Product name"),
+        "editor_sample": _("Sample product"),
+        "evaluate": lambda orderposition, order, event: str(orderposition.item.name)
+    }),
+    ("variation", {
+        "label": _("Variation name"),
+        "editor_sample": _("Sample variation"),
+        "evaluate": lambda op, order, event: str(op.variation) if op.variation else ''
+    }),
+    ("item_description", {
+        "label": _("Product description"),
+        "editor_sample": _("Sample product description"),
+        "evaluate": lambda orderposition, order, event: str(orderposition.item.description)
+    }),
+    ("itemvar", {
+        "label": _("Product name and variation"),
+        "editor_sample": _("Sample product – sample variation"),
+        "evaluate": lambda orderposition, order, event: (
+            '{} - {}'.format(orderposition.item.name, orderposition.variation)
+            if orderposition.variation else str(orderposition.item.name)
+        )
+    }),
+    ("itemvar_description", {
+        "label": _("Product variation description"),
+        "editor_sample": _("Sample product variation description"),
+        "evaluate": lambda orderposition, order, event: (
+            str(orderposition.variation.description) if orderposition.variation else str(orderposition.item.description)
+        )
+    }),
+    ("item_category", {
+        "label": _("Product category"),
+        "editor_sample": _("Ticket category"),
+        "evaluate": lambda orderposition, order, event: (
+            str(orderposition.item.category.name) if orderposition.item.category else ""
+        )
+    }),
+    ("price", {
+        "label": _("Price"),
+        "editor_sample": _("123.45 EUR"),
+        "evaluate": lambda op, order, event: money_filter(op.price, event.currency)
+    }),
+    ("price_with_bundled", {
+        "label": _("Price including bundled products"),
+        "editor_sample": _("123.45 EUR"),
+        "evaluate": lambda op, order, event: money_filter(op.price + sum(
+            p.price
+            for p in op.addons.all()
+            if not p.canceled and p.is_bundled
+        ), event.currency)
+    }),
+    ("price_with_addons", {
+        "label": _("Price including add-ons and bundled products"),
+        "editor_sample": _("123.45 EUR"),
+        "evaluate": lambda op, order, event: money_filter(op.price + sum(
+            p.price
+            for p in op.addons.all()
+            if not p.canceled
+        ), event.currency)
+    }),
+    ("attendee_name", {
+        "label": _("Attendee name"),
+        "editor_sample": _("John Doe"),
+        "evaluate": lambda op, order, ev: op.attendee_name or (op.addon_to.attendee_name if op.addon_to else '')
+    }),
+    ("attendee_company", {
+        "label": _("Attendee company"),
+        "editor_sample": _("Sample company"),
+        "evaluate": lambda op, order, ev: op.company or (op.addon_to.company if op.addon_to else '')
+    }),
+    ('attendee_address', {
+        'label': _('Full attendee address'),
+        'editor_sample': _('John Doe\nSample company\nSesame Street 42\n12345 Any City\nAtlantis'),
+        'evaluate': lambda op, order, event: op.address_format()
+    }),
+    ("attendee_street", {
+        "label": _("Attendee street"),
+        "editor_sample": 'Sesame Street 42',
+        "evaluate": lambda op, order, ev: op.street or (op.addon_to.street if op.addon_to else '')
+    }),
+    ("attendee_zipcode", {
+        "label": _("Attendee ZIP code"),
+        "editor_sample": '12345',
+        "evaluate": lambda op, order, ev: op.zipcode or (op.addon_to.zipcode if op.addon_to else '')
+    }),
+    ("attendee_city", {
+        "label": _("Attendee city"),
+        "editor_sample": 'Any City',
+        "evaluate": lambda op, order, ev: op.city or (op.addon_to.city if op.addon_to else '')
+    }),
+    ("attendee_state", {
+        "label": _("Attendee state"),
+        "editor_sample": 'Sample State',
+        "evaluate": lambda op, order, ev: op.state or (op.addon_to.state if op.addon_to else '')
+    }),
+    ("attendee_country", {
+        "label": _("Attendee country"),
+        "editor_sample": 'Atlantis',
+        "evaluate": lambda op, order, ev: str(getattr(op.country, 'name', '')) or (
+            str(getattr(op.addon_to.country, 'name', '')) if op.addon_to else ''
+        )
+    }),
+    ("attendee_email", {
+        "label": _("Attendee email"),
+        "editor_sample": 'foo@bar.com',
+        "evaluate": lambda op, order, ev: op.attendee_email or (op.addon_to.attendee_email if op.addon_to else '')
+    }),
+    ("pseudonymization_id", {
+        "label": _("Pseudonymization ID (lead scanning)"),
+        "editor_sample": "GG89JUJDTA",
+        "evaluate": lambda orderposition, order, event: orderposition.pseudonymization_id,
+    }),
+    ("event_name", {
+        "label": _("Event name"),
+        "editor_sample": _("Sample event name"),
+        "evaluate": lambda op, order, ev: str(ev.name)
+    }),
+    ("event_series_name", {
+        "label": _("Event series"),
+        "editor_sample": _("Sample event name"),
+        "evaluate": lambda op, order, ev: str(order.event.name)
+    }),
+    ("event_date", {
+        "label": _("Event date"),
+        "editor_sample": _("May 31st, 2017"),
+        "evaluate": lambda op, order, ev: ev.get_date_from_display(show_times=False)
+    }),
+    ("event_date_range", {
+        "label": _("Event date range"),
+        "editor_sample": _("May 31st – June 4th, 2017"),
+        "evaluate": lambda op, order, ev: ev.get_date_range_display(force_show_end=True)
+    }),
+    ("event_begin", {
+        "label": _("Event begin date and time"),
+        "editor_sample": _("2017-05-31 20:00"),
+        "evaluate": lambda op, order, ev: date_format(
+            ev.date_from.astimezone(ev.timezone),
+            "SHORT_DATETIME_FORMAT"
+        ) if ev.date_from else ""
+    }),
+    ("event_begin_date", {
+        "label": _("Event begin date"),
+        "editor_sample": _("2017-05-31"),
+        "evaluate": lambda op, order, ev: date_format(
+            ev.date_from.astimezone(ev.timezone),
+            "SHORT_DATE_FORMAT"
+        ) if ev.date_from else ""
+    }),
+    ("event_begin_time", {
+        "label": _("Event begin time"),
+        "editor_sample": _("20:00"),
+        "evaluate": lambda op, order, ev: ev.get_time_from_display()
+    }),
+    ("event_begin_weekday", {
+        "label": _("Event begin weekday"),
+        "editor_sample": _("Friday"),
+        "evaluate": lambda op, order, ev: ev.get_weekday_from_display()
+    }),
+    ("event_end", {
+        "label": _("Event end date and time"),
+        "editor_sample": _("2017-05-31 22:00"),
+        "evaluate": lambda op, order, ev: date_format(
+            ev.date_to.astimezone(ev.timezone),
+            "SHORT_DATETIME_FORMAT"
+        ) if ev.date_to else ""
+    }),
+    ("event_end_date", {
+        "label": _("Event end date"),
+        "editor_sample": _("2017-05-31"),
+        "evaluate": lambda op, order, ev: date_format(
+            ev.date_to.astimezone(ev.timezone),
+            "SHORT_DATE_FORMAT"
+        ) if ev.date_to else ""
+    }),
+    ("event_end_time", {
+        "label": _("Event end time"),
+        "editor_sample": _("22:00"),
+        "evaluate": lambda op, order, ev: date_format(
+            ev.date_to.astimezone(ev.timezone),
+            "TIME_FORMAT"
+        ) if ev.date_to else ""
+    }),
+    ("event_end_weekday", {
+        "label": _("Event end weekday"),
+        "editor_sample": _("Friday"),
+        "evaluate": lambda op, order, ev: ev.get_weekday_to_display()
+    }),
+    ("event_admission", {
+        "label": _("Event admission date and time"),
+        "editor_sample": _("2017-05-31 19:00"),
+        "evaluate": lambda op, order, ev: date_format(
+            ev.date_admission.astimezone(ev.timezone),
+            "SHORT_DATETIME_FORMAT"
+        ) if ev.date_admission else ""
+    }),
+    ("event_admission_time", {
+        "label": _("Event admission time"),
+        "editor_sample": _("19:00"),
+        "evaluate": lambda op, order, ev: date_format(
+            ev.date_admission.astimezone(ev.timezone),
+            "TIME_FORMAT"
+        ) if ev.date_admission else ""
+    }),
+    ("event_location", {
+        "label": _("Event location"),
+        "editor_sample": _("Random City"),
+        "evaluate": lambda op, order, ev: str(ev.location)
+    }),
+    ("telephone", {
+        "label": _("Phone number"),
+        "editor_sample": "+01 1234 567890",
+        "evaluate": lambda op, order, ev: phone_format(order.phone, html=False)
+    }),
+    ("email", {
+        "label": _("Email"),
+        "editor_sample": "foo@bar.com",
+        "evaluate": lambda op, order, ev: order.email
+    }),
+    ("invoice_name", {
+        "label": _("Invoice address name"),
+        "editor_sample": _("John Doe"),
+        "evaluate": lambda op, order, ev: order.invoice_address.name if getattr(order, 'invoice_address', None) else ''
+    }),
+    ("invoice_company", {
+        "label": _("Invoice address company"),
+        "editor_sample": _("Sample company"),
+        "evaluate": lambda op, order, ev: order.invoice_address.company if getattr(order, 'invoice_address', None) else ''
+    }),
+    ("invoice_street", {
+        "label": _("Invoice address street"),
+        "editor_sample": _("Sesame Street 42"),
+        "evaluate": lambda op, order, ev: order.invoice_address.street if getattr(order, 'invoice_address', None) else ''
+    }),
+    ("invoice_zipcode", {
+        "label": _("Invoice address ZIP code"),
+        "editor_sample": _("12345"),
+        "evaluate": lambda op, order, ev: order.invoice_address.zipcode if getattr(order, 'invoice_address', None) else ''
+    }),
+    ("invoice_city", {
+        "label": _("Invoice address city"),
+        "editor_sample": _("Sample city"),
+        "evaluate": lambda op, order, ev: order.invoice_address.city if getattr(order, 'invoice_address', None) else ''
+    }),
+    ("invoice_state", {
+        "label": _("Invoice address state"),
+        "editor_sample": _("Sample State"),
+        "evaluate": lambda op, order, ev: order.invoice_address.state if getattr(order, 'invoice_address', None) else ''
+    }),
+    ("invoice_country", {
+        "label": _("Invoice address country"),
+        "editor_sample": _("Atlantis"),
+        "evaluate": lambda op, order, ev: str(getattr(order.invoice_address.country, 'name', '')) if getattr(order, 'invoice_address', None) else ''
+    }),
+    ("addons", {
+        "label": _("List of Add-Ons"),
+        "editor_sample": _("Add-on 1\n2x Add-on 2"),
+        "evaluate": lambda op, order, ev: "\n".join([
+            str(p) for p in generate_compressed_addon_list(op, order, ev)
+        ])
+    }),
+    ("organizer", {
+        "label": _("Organizer name"),
+        "editor_sample": _("Event organizer company"),
+        "evaluate": lambda op, order, ev: str(order.event.organizer.name)
+    }),
+    ("organizer_info_text", {
+        "label": _("Organizer info text"),
+        "editor_sample": _("Event organizer info text"),
+        "evaluate": lambda op, order, ev: str(order.event.settings.organizer_info_text)
+    }),
+    ("event_info_text", {
+        "label": _("Event info text"),
+        "editor_sample": _("Event info text"),
+        "evaluate": lambda op, order, ev: str(order.event.settings.event_info_text)
+    }),
+    ("now_date", {
+        "label": _("Printing date"),
+        "editor_sample": _("2017-05-31"),
+        "evaluate": lambda op, order, ev: date_format(
+            now().astimezone(ev.timezone),
+            "SHORT_DATE_FORMAT"
+        )
+    }),
+    ("now_datetime", {
+        "label": _("Printing date and time"),
+        "editor_sample": _("2017-05-31 19:00"),
+        "evaluate": lambda op, order, ev: date_format(
+            now().astimezone(ev.timezone),
+            "SHORT_DATETIME_FORMAT"
+        )
+    }),
+    ("now_time", {
+        "label": _("Printing time"),
+        "editor_sample": _("19:00"),
+        "evaluate": lambda op, order, ev: date_format(
+            now().astimezone(ev.timezone),
+            "TIME_FORMAT"
+        )
+    }),
+    ("purchase_date", {
+        "label": _("Purchase date"),
+        "editor_sample": _("2017-05-31"),
+        "evaluate": lambda op, order, ev: date_format(
+            order.datetime.astimezone(ev.timezone),
+            "SHORT_DATE_FORMAT"
+        )
+    }),
+    ("purchase_datetime", {
+        "label": _("Purchase date and time"),
+        "editor_sample": _("2017-05-31 19:00"),
+        "evaluate": lambda op, order, ev: date_format(
+            order.datetime.astimezone(ev.timezone),
+            "SHORT_DATETIME_FORMAT"
+        )
+    }),
+    ("purchase_time", {
+        "label": _("Purchase time"),
+        "editor_sample": _("19:00"),
+        "evaluate": lambda op, order, ev: date_format(
+            order.datetime.astimezone(ev.timezone),
+            "TIME_FORMAT"
+        )
+    }),
+    ("valid_from_date", {
+        "label": _("Validity start date"),
+        "editor_sample": _("2017-05-31"),
+        "evaluate": lambda op, order, ev: date_format(
+            op.valid_from.astimezone(ev.timezone),
+            "SHORT_DATE_FORMAT"
+        ) if op.valid_from else ""
+    }),
+    ("valid_from_datetime", {
+        "label": _("Validity start date and time"),
+        "editor_sample": _("2017-05-31 19:00"),
+        "evaluate": lambda op, order, ev: date_format(
+            op.valid_from.astimezone(ev.timezone),
+            "SHORT_DATETIME_FORMAT"
+        ) if op.valid_from else ""
+    }),
+    ("valid_from_time", {
+        "label": _("Validity start time"),
+        "editor_sample": _("19:00"),
+        "evaluate": lambda op, order, ev: date_format(
+            op.valid_from.astimezone(ev.timezone),
+            "TIME_FORMAT"
+        ) if op.valid_from else ""
+    }),
+    ("valid_until_date", {
+        "label": _("Validity end date"),
+        "editor_sample": _("2017-05-31"),
+        "evaluate": lambda op, order, ev: date_format(
+            op.valid_until.astimezone(ev.timezone),
+            "SHORT_DATE_FORMAT"
+        ) if op.valid_until else ""
+    }),
+    ("valid_until_datetime", {
+        "label": _("Validity end date and time"),
+        "editor_sample": _("2017-05-31 19:00"),
+        "evaluate": lambda op, order, ev: date_format(
+            op.valid_until.astimezone(ev.timezone),
+            "SHORT_DATETIME_FORMAT"
+        ) if op.valid_until else ""
+    }),
+    ("valid_until_time", {
+        "label": _("Validity end time"),
+        "editor_sample": _("19:00"),
+        "evaluate": lambda op, order, ev: date_format(
+            op.valid_until.astimezone(ev.timezone),
+            "TIME_FORMAT"
+        ) if op.valid_until else ""
+    }),
+    ("program_times", {
+        "label": _("Program times: date and time"),
+        "editor_sample": _(
+            "2017-05-31 10:00 – 12:00\n2017-05-31 14:00 – 16:00\n2017-05-31 14:00 – 2017-06-01 14:00"),
+        "evaluate": lambda op, order, ev: get_program_times(op, ev)
+    }),
+    ("medium_identifier", {
+        "label": _("Reusable Medium ID"),
+        "editor_sample": "ABC1234DEF4567",
+        "evaluate": lambda op, order, ev: op.linked_media.all()[0].identifier if op.linked_media.all() else "",
+    }),
+    ("seat", {
+        "label": _("Seat: Full name"),
+        "editor_sample": _("Ground floor, Row 3, Seat 4"),
+        "evaluate": lambda op, order, ev: str(get_seat(op) if get_seat(op) else
+                                              _('General admission') if ev.seating_plan_id is not None else "")
+    }),
+    ("seat_zone", {
+        "label": _("Seat: zone"),
+        "editor_sample": _("Ground floor"),
+        "evaluate": lambda op, order, ev: str(get_seat(op).zone_name if get_seat(op) else
+                                              _('General admission') if ev.seating_plan_id is not None else "")
+    }),
+    ("seat_row", {
+        "label": _("Seat: row"),
+        "editor_sample": "3",
+        "evaluate": lambda op, order, ev: str(get_seat(op).row_name if get_seat(op) else "")
+    }),
+    ("seat_number", {
+        "label": _("Seat: seat number"),
+        "editor_sample": 4,
+        "evaluate": lambda op, order, ev: str(get_seat(op).seat_number if get_seat(op) else "")
+    }),
+    ("first_scan", {
+        "label": _("Date and time of first scan"),
+        "editor_sample": _("2017-05-31 19:00"),
+        "evaluate": lambda op, order, ev: get_first_scan(op)
+    }),
+    ("giftcard_issuance_date", {
+
+        "label": _("Gift card: Issuance date"),
+        "editor_sample": _("2017-05-31"),
+        "evaluate": lambda op, order, ev: get_giftcard_issuance(op, ev)
+    }),
+    ("giftcard_expiry_date", {
+        "label": _("Gift card: Expiration date"),
+        "editor_sample": _("2017-05-31"),
+        "evaluate": lambda op, order, ev: get_giftcard_expiry(op, ev)
+    }),
+))
 DEFAULT_IMAGES = OrderedDict([])
 
 
-@receiver(
-    layout_image_variables, dispatch_uid="pretix_base_layout_image_variables_questions"
-)
+@receiver(layout_image_variables, dispatch_uid="pretix_base_layout_image_variables_questions")
 def images_from_questions(sender, *args, **kwargs):
     def get_answer(op, order, event, question_id, etag):
         a = None
         if op.addon_to:
-            if "answers" in getattr(op.addon_to, "_prefetched_objects_cache", {}):
+            if 'answers' in getattr(op.addon_to, '_prefetched_objects_cache', {}):
                 try:
-                    a = [
-                        a
-                        for a in op.addon_to.answers.all()
-                        if a.question_id == question_id
-                    ][0]
+                    a = [a for a in op.addon_to.answers.all() if a.question_id == question_id][0]
                 except IndexError:
                     pass
             else:
                 a = op.addon_to.answers.filter(question_id=question_id).first()
 
-        if "answers" in getattr(op, "_prefetched_objects_cache", {}):
+        if 'answers' in getattr(op, '_prefetched_objects_cache', {}):
             try:
                 a = [a for a in op.answers.all() if a.question_id == question_id][0]
             except IndexError:
@@ -919,14 +564,7 @@ def images_from_questions(sender, *args, **kwargs):
         else:
             a = op.answers.filter(question_id=question_id).first() or a
 
-        if (
-            not a
-            or not a.file
-            or not any(
-                a.file.name.lower().endswith(e)
-                for e in settings.FILE_UPLOAD_EXTENSIONS_QUESTION_IMAGE
-            )
-        ):
+        if not a or not a.file or not any(a.file.name.lower().endswith(e) for e in settings.FILE_UPLOAD_EXTENSIONS_QUESTION_IMAGE):
             return None
         else:
             if etag:
@@ -937,34 +575,28 @@ def images_from_questions(sender, *args, **kwargs):
     for q in sender.questions.all():
         if q.type != Question.TYPE_FILE:
             continue
-        d["question_{}".format(q.identifier)] = {
-            "label": _("Question: {question}").format(question=q.question),
-            "evaluate": partial(get_answer, question_id=q.pk, etag=False),
-            "etag": partial(get_answer, question_id=q.pk, etag=True),
+        d['question_{}'.format(q.identifier)] = {
+            'label': _('Question: {question}').format(question=q.question),
+            'evaluate': partial(get_answer, question_id=q.pk, etag=False),
+            'etag': partial(get_answer, question_id=q.pk, etag=True),
         }
     return d
 
 
-@receiver(
-    layout_text_variables, dispatch_uid="pretix_base_layout_text_variables_questions"
-)
+@receiver(layout_text_variables, dispatch_uid="pretix_base_layout_text_variables_questions")
 def variables_from_questions(sender, *args, **kwargs):
     def get_answer(op, order, event, question_id):
         a = None
         if op.addon_to:
-            if "answers" in getattr(op.addon_to, "_prefetched_objects_cache", {}):
+            if 'answers' in getattr(op.addon_to, '_prefetched_objects_cache', {}):
                 try:
-                    a = [
-                        a
-                        for a in op.addon_to.answers.all()
-                        if a.question_id == question_id
-                    ][0]
+                    a = [a for a in op.addon_to.answers.all() if a.question_id == question_id][0]
                 except IndexError:
                     pass
             else:
                 a = op.addon_to.answers.filter(question_id=question_id).first()
 
-        if "answers" in getattr(op, "_prefetched_objects_cache", {}):
+        if 'answers' in getattr(op, '_prefetched_objects_cache', {}):
             try:
                 a = [a for a in op.answers.all() if a.question_id == question_id][0]
             except IndexError:
@@ -981,46 +613,36 @@ def variables_from_questions(sender, *args, **kwargs):
     for q in sender.questions.all():
         if q.type == Question.TYPE_FILE:
             continue
-        d["question_{}".format(q.identifier)] = {
-            "label": _("Question: {question}").format(question=q.question),
-            "editor_sample": _("<Answer: {question}>").format(question=q.question),
-            "evaluate": partial(get_answer, question_id=q.pk),
-            "migrate_from": "question_{}".format(q.pk),
+        d['question_{}'.format(q.identifier)] = {
+            'label': _('Question: {question}').format(question=q.question),
+            'editor_sample': _('<Answer: {question}>').format(question=q.question),
+            'evaluate': partial(get_answer, question_id=q.pk),
+            'migrate_from': 'question_{}'.format(q.pk)
         }
-        d["question_{}".format(q.pk)] = {
-            "label": _("Question: {question}").format(question=q.question),
-            "editor_sample": _("<Answer: {question}>").format(question=q.question),
-            "evaluate": partial(get_answer, question_id=q.pk),
-            "hidden": True,
+        d['question_{}'.format(q.pk)] = {
+            'label': _('Question: {question}').format(question=q.question),
+            'editor_sample': _('<Answer: {question}>').format(question=q.question),
+            'evaluate': partial(get_answer, question_id=q.pk),
+            'hidden': True,
         }
     return d
 
 
 def _get_attendee_name_part(key, op, order, ev):
-    name_parts = op.attendee_name_parts or (
-        op.addon_to.attendee_name_parts if op.addon_to else {}
-    )
+    name_parts = op.attendee_name_parts or (op.addon_to.attendee_name_parts if op.addon_to else {})
     if isinstance(key, tuple):
-        parts = [
-            _get_attendee_name_part(c[0], op, order, ev)
-            for c in key
-            if not (c[0] == "salutation" and name_parts.get(c[0], "") == "Mx")
-        ]
-        return " ".join(p for p in parts if p)
-    value = name_parts.get(key, "")
-    if key == "salutation":
-        return pgettext("person_name_salutation", value)
+        parts = [_get_attendee_name_part(c[0], op, order, ev) for c in key if not (c[0] == 'salutation' and name_parts.get(c[0], '') == "Mx")]
+        return ' '.join(p for p in parts if p)
+    value = name_parts.get(key, '')
+    if key == 'salutation':
+        return pgettext('person_name_salutation', value)
     return value
 
 
 def _get_ia_name_part(key, op, order, ev):
-    value = (
-        order.invoice_address.name_parts.get(key, "")
-        if getattr(order, "invoice_address", None)
-        else ""
-    )
-    if key == "salutation" and value:
-        return pgettext("person_name_salutation", value)
+    value = order.invoice_address.name_parts.get(key, '') if getattr(order, 'invoice_address', None) else ''
+    if key == 'salutation' and value:
+        return pgettext('person_name_salutation', value)
     return value
 
 
@@ -1038,52 +660,41 @@ def get_variables(event):
 
     scheme = PERSON_NAME_SCHEMES[event.settings.name_scheme]
 
-    concatenation_for_salutation = scheme.get(
-        "concatenation_for_salutation", scheme["concatenation"]
-    )
-    v["attendee_name_for_salutation"] = {
-        "label": _("Attendee name for salutation"),
-        "editor_sample": _("Mr Doe"),
-        "evaluate": lambda op, order, ev: concatenation_for_salutation(
-            op.attendee_name_parts
-            or (op.addon_to.attendee_name_parts if op.addon_to else {})
-        ),
+    concatenation_for_salutation = scheme.get("concatenation_for_salutation", scheme["concatenation"])
+    v['attendee_name_for_salutation'] = {
+        'label': _("Attendee name for salutation"),
+        'editor_sample': _("Mr Doe"),
+        'evaluate': lambda op, order, ev: concatenation_for_salutation(op.attendee_name_parts or (op.addon_to.attendee_name_parts if op.addon_to else {}))
     }
 
-    for key, label, weight in scheme["fields"]:
-        v["attendee_name_%s" % key] = {
-            "label": _("Attendee name: {part}").format(part=label),
-            "editor_sample": scheme["sample"][key],
-            "evaluate": partial(_get_attendee_name_part, key),
+    for key, label, weight in scheme['fields']:
+        v['attendee_name_%s' % key] = {
+            'label': _("Attendee name: {part}").format(part=label),
+            'editor_sample': scheme['sample'][key],
+            'evaluate': partial(_get_attendee_name_part, key)
         }
-    for i in range(2, len(scheme["fields"]) + 1):
-        for comb in itertools.combinations(scheme["fields"], i):
-            v["attendee_name_%s" % ("_".join(c[0] for c in comb))] = {
-                "label": _("Attendee name: {part}").format(
-                    part=" + ".join(str(c[1]) for c in comb)
-                ),
-                "editor_sample": " ".join(str(scheme["sample"][c[0]]) for c in comb),
-                "evaluate": partial(_get_attendee_name_part, comb),
+    for i in range(2, len(scheme['fields']) + 1):
+        for comb in itertools.combinations(scheme['fields'], i):
+            v['attendee_name_%s' % ('_'.join(c[0] for c in comb))] = {
+                'label': _("Attendee name: {part}").format(part=' + '.join(str(c[1]) for c in comb)),
+                'editor_sample': ' '.join(str(scheme['sample'][c[0]]) for c in comb),
+                'evaluate': partial(_get_attendee_name_part, comb)
             }
 
-    v["invoice_name"]["editor_sample"] = scheme["concatenation"](scheme["sample"])
-    v["attendee_name"]["editor_sample"] = scheme["concatenation"](scheme["sample"])
+    v['invoice_name']['editor_sample'] = scheme['concatenation'](scheme['sample'])
+    v['attendee_name']['editor_sample'] = scheme['concatenation'](scheme['sample'])
 
-    v["invoice_name_for_salutation"] = {
-        "label": _("Invoice address name for salutation"),
-        "editor_sample": _("Mr Doe"),
-        "evaluate": lambda op, order, ev: concatenation_for_salutation(
-            order.invoice_address.name_parts
-            if getattr(order, "invoice_address", None)
-            else {}
-        ),
+    v['invoice_name_for_salutation'] = {
+        'label': _("Invoice address name for salutation"),
+        'editor_sample': _("Mr Doe"),
+        'evaluate': lambda op, order, ev: concatenation_for_salutation(order.invoice_address.name_parts if getattr(order, 'invoice_address', None) else {})
     }
 
-    for key, label, weight in scheme["fields"]:
-        v["invoice_name_%s" % key] = {
-            "label": _("Invoice address name: {part}").format(part=label),
-            "editor_sample": scheme["sample"][key],
-            "evaluate": partial(_get_ia_name_part, key),
+    for key, label, weight in scheme['fields']:
+        v['invoice_name_%s' % key] = {
+            'label': _("Invoice address name: {part}").format(part=label),
+            'editor_sample': scheme['sample'][key],
+            "evaluate": partial(_get_ia_name_part, key)
         }
 
     for recv, res in layout_text_variables.send(sender=event):
@@ -1095,7 +706,7 @@ def get_variables(event):
 def get_giftcard_expiry(op: OrderPosition, ev):
     if not op.item.issue_giftcard:
         return ""  # performance optimization
-    m = op.issued_gift_cards.aggregate(m=Min("expires"))["m"]
+    m = op.issued_gift_cards.aggregate(m=Min('expires'))['m']
     if not m:
         return ""
     return date_format(m.astimezone(ev.timezone), "SHORT_DATE_FORMAT")
@@ -1104,7 +715,7 @@ def get_giftcard_expiry(op: OrderPosition, ev):
 def get_giftcard_issuance(op: OrderPosition, ev):
     if not op.item.issue_giftcard:
         return ""  # performance optimization
-    m = op.issued_gift_cards.aggregate(m=Max("issuance"))["m"]
+    m = op.issued_gift_cards.aggregate(m=Max('issuance'))['m']
     if not m:
         return ""
     return date_format(m.astimezone(ev.timezone), "SHORT_DATE_FORMAT")
@@ -1116,7 +727,7 @@ def get_first_scan(op: OrderPosition):
     if scans:
         return date_format(
             list(op.checkins.all())[-1].datetime.astimezone(op.order.event.timezone),
-            "SHORT_DATETIME_FORMAT",
+            "SHORT_DATETIME_FORMAT"
         )
     return ""
 
@@ -1130,29 +741,21 @@ def get_seat(op: OrderPosition):
 
 
 def get_program_times(op: OrderPosition, ev: Event):
-    return "\n".join(
-        [
-            datetimerange(
-                pt.start.astimezone(ev.timezone),
-                pt.end.astimezone(ev.timezone),
-                as_html=False,
-            )
-            for pt in op.item.program_times.all()
-        ]
-    )
+    return '\n'.join([
+        datetimerange(
+            pt.start.astimezone(ev.timezone),
+            pt.end.astimezone(ev.timezone),
+            as_html=False
+        ) for pt in op.item.program_times.all()
+    ])
 
 
 def generate_compressed_addon_list(op, order, event):
     itemcount = defaultdict(int)
-    addons = [
-        p
-        for p in (
-            op.addons.all()
-            if "addons" in getattr(op, "_prefetched_objects_cache", {})
-            else op.addons.select_related("item", "variation")
-        )
-        if not p.canceled
-    ]
+    addons = [p for p in (
+        op.addons.all() if 'addons' in getattr(op, '_prefetched_objects_cache', {})
+        else op.addons.select_related('item', 'variation')
+    ) if not p.canceled]
     for pos in addons:
         itemcount[pos.item, pos.variation] += 1
 
@@ -1160,20 +763,19 @@ def generate_compressed_addon_list(op, order, event):
     for (item, variation), count in itemcount.items():
         if variation:
             if count > 1:
-                addonlist.append(
-                    "{}x {} - {}".format(count, item.name, variation.value)
-                )
+                addonlist.append('{}x {} - {}'.format(count, item.name, variation.value))
             else:
-                addonlist.append("{} - {}".format(item.name, variation.value))
+                addonlist.append('{} - {}'.format(item.name, variation.value))
         else:
             if count > 1:
-                addonlist.append("{}x {}".format(count, item.name))
+                addonlist.append('{}x {}'.format(count, item.name))
             else:
                 addonlist.append(item.name)
     return addonlist
 
 
 class Renderer:
+
     def __init__(self, event, layout, background_file):
         self.layout = layout
         self.background_file = background_file
@@ -1186,72 +788,49 @@ class Renderer:
         else:
             self.bg_bytes = None
             self.bg_pdf = None
-        self.event_fonts = list(get_fonts(event, pdf_support_required=True).keys()) + [
-            "Open Sans"
-        ]
+        self.event_fonts = list(get_fonts(event, pdf_support_required=True).keys()) + ['Open Sans']
 
     @classmethod
     def _register_fonts(cls, event: Event = None):
-        if hasattr(cls, "_fonts_registered"):
+        if hasattr(cls, '_fonts_registered'):
             return
-        register_ttf_font_if_new(
-            "Open Sans", finders.find("fonts/OpenSans-Regular.ttf")
-        )
-        register_ttf_font_if_new(
-            "Open Sans I", finders.find("fonts/OpenSans-Italic.ttf")
-        )
-        register_ttf_font_if_new("Open Sans B", finders.find("fonts/OpenSans-Bold.ttf"))
-        register_ttf_font_if_new(
-            "Open Sans B I", finders.find("fonts/OpenSans-BoldItalic.ttf")
-        )
+        register_ttf_font_if_new('Open Sans', finders.find('fonts/OpenSans-Regular.ttf'))
+        register_ttf_font_if_new('Open Sans I', finders.find('fonts/OpenSans-Italic.ttf'))
+        register_ttf_font_if_new('Open Sans B', finders.find('fonts/OpenSans-Bold.ttf'))
+        register_ttf_font_if_new('Open Sans B I', finders.find('fonts/OpenSans-BoldItalic.ttf'))
 
         for family, styles in get_fonts(event, pdf_support_required=True).items():
-            register_ttf_font_if_new(
-                family, finders.find(styles["regular"]["truetype"])
-            )
-            if "italic" in styles:
-                register_ttf_font_if_new(
-                    family + " I", finders.find(styles["italic"]["truetype"])
-                )
-            if "bold" in styles:
-                register_ttf_font_if_new(
-                    family + " B", finders.find(styles["bold"]["truetype"])
-                )
-            if "bolditalic" in styles:
-                register_ttf_font_if_new(
-                    family + " B I", finders.find(styles["bolditalic"]["truetype"])
-                )
+            register_ttf_font_if_new(family, finders.find(styles['regular']['truetype']))
+            if 'italic' in styles:
+                register_ttf_font_if_new(family + ' I', finders.find(styles['italic']['truetype']))
+            if 'bold' in styles:
+                register_ttf_font_if_new(family + ' B', finders.find(styles['bold']['truetype']))
+            if 'bolditalic' in styles:
+                register_ttf_font_if_new(family + ' B I', finders.find(styles['bolditalic']['truetype']))
 
         cls._fonts_registered = True
 
     def _draw_poweredby(self, canvas: Canvas, op: OrderPosition, o: dict):
-        content = o.get("content", "dark")
-        if content not in ("dark", "white"):
-            content = "dark"
-        img = finders.find("pretixpresale/pdf/powered_by_pretix_{}.png".format(content))
+        content = o.get('content', 'dark')
+        if content not in ('dark', 'white'):
+            content = 'dark'
+        img = finders.find('pretixpresale/pdf/powered_by_pretix_{}.png'.format(content))
 
         ir = ThumbnailingImageReader(img)
         try:
-            width, height = ir.resize(None, float(o["size"]) * mm, 300)
+            width, height = ir.resize(None, float(o['size']) * mm, 300)
         except:
             logger.exception("Can not resize image")
             pass
-        canvas.drawImage(
-            ir,
-            float(o["left"]) * mm,
-            float(o["bottom"]) * mm,
-            width=width,
-            height=height,
-            preserveAspectRatio=True,
-            anchor="n",
-            mask="auto",
-        )
+        canvas.drawImage(ir,
+                         float(o['left']) * mm, float(o['bottom']) * mm,
+                         width=width, height=height,
+                         preserveAspectRatio=True, anchor='n',
+                         mask='auto')
 
-    def _draw_barcodearea(
-        self, canvas: Canvas, op: OrderPosition, order: Order, o: dict
-    ):
-        content = o.get("content", "secret")
-        if content == "secret":
+    def _draw_barcodearea(self, canvas: Canvas, op: OrderPosition, order: Order, o: dict):
+        content = o.get('content', 'secret')
+        if content == 'secret':
             # do not use get_text_content because it uses a shortened version of secret
             # and does not deal with our default value here properly
             content = op.secret
@@ -1261,35 +840,34 @@ class Renderer:
         if len(content) == 0:
             return
 
-        level = "H"
+        level = 'H'
         if len(content) > 32:
-            level = "M"
+            level = 'M'
         if len(content) > 128:
-            level = "L"
-        reqs = float(o["size"]) * mm
+            level = 'L'
+        reqs = float(o['size']) * mm
         kwargs = {}
-        if o.get("nowhitespace", False):
-            kwargs["barBorder"] = 0
+        if o.get('nowhitespace', False):
+            kwargs['barBorder'] = 0
 
-        if o.get("color"):
-            kwargs["barFillColor"] = Color(
-                o["color"][0] / 255, o["color"][1] / 255, o["color"][2] / 255
-            )
+        if o.get('color'):
+            kwargs['barFillColor'] = Color(o['color'][0] / 255, o['color'][1] / 255, o['color'][2] / 255)
 
-        qrw = QrCodeWidget(
-            content, barLevel=level, barHeight=reqs, barWidth=reqs, **kwargs
-        )
+        qrw = QrCodeWidget(content, barLevel=level, barHeight=reqs, barWidth=reqs, **kwargs)
         d = Drawing(reqs, reqs)
         d.add(qrw)
-        qr_x = float(o["left"]) * mm
-        qr_y = float(o["bottom"]) * mm
+        qr_x = float(o['left']) * mm
+        qr_y = float(o['bottom']) * mm
         renderPDF.draw(d, canvas, qr_x, qr_y)
 
         # Add QR content + PDF issuer as a hidden string (fully transparent & very very small)
         # This helps automated processing of the PDF file by 3rd parties, e.g. when checking tickets for resale
-        data = {"issuer": settings.SITE_URL, o.get("content", "secret"): content}
+        data = {
+            "issuer": settings.SITE_URL,
+            o.get('content', 'secret'): content
+        }
         canvas.saveState()
-        canvas.setFont("Open Sans", 0.01)
+        canvas.setFont('Open Sans', .01)
         canvas.setFillColorRGB(0, 0, 0, 0)
         canvas.drawString(0 * mm, 0 * mm, json.dumps(data, sort_keys=True))
         canvas.restoreState()
@@ -1298,85 +876,85 @@ class Renderer:
         return op.subevent or order.event
 
     def _get_text_content(self, op: OrderPosition, order: Order, o: dict, inner=False):
-        if o.get("locale", None) and not inner:
-            with language(o["locale"], self.event.settings.region):
+        if o.get('locale', None) and not inner:
+            with language(o['locale'], self.event.settings.region):
                 return self._get_text_content(op, order, o, True)
 
         ev = self._get_ev(op, order)
 
-        if not o["content"]:
-            return "(error)"
+        if not o['content']:
+            return '(error)'
 
-        if o["content"] == "other" or o["content"] == "other_i18n":
-            if o["content"] == "other_i18n":
-                text = str(LazyI18nString(o.get("text_i18n", {})))
+        if o['content'] == 'other' or o['content'] == 'other_i18n':
+            if o['content'] == 'other_i18n':
+                text = str(LazyI18nString(o.get('text_i18n', {})))
             else:
-                text = o.get("text", "")
+                text = o.get('text', '')
 
             def replace(x):
-                if x.group(1).startswith("itemmeta:"):
+                if x.group(1).startswith('itemmeta:'):
                     if op.variation_id:
-                        return op.variation.meta_data.get(x.group(1)[9:]) or ""
-                    return op.item.meta_data.get(x.group(1)[9:]) or ""
-                elif x.group(1).startswith("meta:"):
-                    return ev.meta_data.get(x.group(1)[5:]) or ""
+                        return op.variation.meta_data.get(x.group(1)[9:]) or ''
+                    return op.item.meta_data.get(x.group(1)[9:]) or ''
+                elif x.group(1).startswith('meta:'):
+                    return ev.meta_data.get(x.group(1)[5:]) or ''
                 elif x.group(1) not in self.variables:
                     return x.group(0)
-                if x.group(1) == "secret":
+                if x.group(1) == 'secret':
                     # Do not use shortened version
                     return op.secret
 
                 try:
-                    return self.variables[x.group(1)]["evaluate"](op, order, ev)
+                    return self.variables[x.group(1)]['evaluate'](op, order, ev)
                 except:
-                    logger.exception("Failed to process variable.")
-                    return "(error)"
+                    logger.exception('Failed to process variable.')
+                    return '(error)'
 
             # We do not use str.format like in emails so we (a) can evaluate lazily and (b) can re-implement this
             # 1:1 on other platforms that render PDFs through our API (libpretixprint)
-            return re.sub(r"\{([a-zA-Z0-9:_]+)\}", replace, text)
+            return re.sub(r'\{([a-zA-Z0-9:_]+)\}', replace, text)
 
-        elif o["content"].startswith("itemmeta:"):
+        elif o['content'].startswith('itemmeta:'):
             if op.variation_id:
-                return op.variation.meta_data.get(o["content"][9:]) or ""
-            return op.item.meta_data.get(o["content"][9:]) or ""
+                return op.variation.meta_data.get(o['content'][9:]) or ''
+            return op.item.meta_data.get(o['content'][9:]) or ''
 
-        elif o["content"].startswith("meta:"):
-            return ev.meta_data.get(o["content"][5:]) or ""
+        elif o['content'].startswith('meta:'):
+            return ev.meta_data.get(o['content'][5:]) or ''
 
-        elif o["content"] in self.variables:
+        elif o['content'] in self.variables:
             try:
-                return self.variables[o["content"]]["evaluate"](op, order, ev)
+                return self.variables[o['content']]['evaluate'](op, order, ev)
             except:
-                logger.exception("Failed to process variable.")
-                return "(error)"
+                logger.exception('Failed to process variable.')
+                return '(error)'
 
-        return ""
+        return ''
 
     def _draw_imagearea(self, canvas: Canvas, op: OrderPosition, order: Order, o: dict):
         ev = self._get_ev(op, order)
-        if not o["content"] or o["content"] not in self.images:
+        if not o['content'] or o['content'] not in self.images:
             image_file = None
         else:
             try:
-                image_file = self.images[o["content"]]["evaluate"](op, order, ev)
+                image_file = self.images[o['content']]['evaluate'](op, order, ev)
             except:
-                logger.exception("Failed to process variable.")
+                logger.exception('Failed to process variable.')
                 image_file = None
 
         if image_file:
             try:
                 ir = ThumbnailingImageReader(image_file)
-                ir.resize(float(o["width"]) * mm, float(o["height"]) * mm, 300)
+                ir.resize(float(o['width']) * mm, float(o['height']) * mm, 300)
                 canvas.drawImage(
                     image=ir,
-                    x=float(o["left"]) * mm,
-                    y=float(o["bottom"]) * mm,
-                    width=float(o["width"]) * mm,
-                    height=float(o["height"]) * mm,
+                    x=float(o['left']) * mm,
+                    y=float(o['bottom']) * mm,
+                    width=float(o['width']) * mm,
+                    height=float(o['height']) * mm,
                     preserveAspectRatio=True,
-                    anchor="c",  # centered in frame
-                    mask="auto",
+                    anchor='c',  # centered in frame
+                    mask='auto'
                 )
                 if isinstance(image_file, FieldFile):
                     # ThumbnailingImageReader "closes" the file, so it's no use to use the same file pointer
@@ -1386,85 +964,75 @@ class Renderer:
             except:
                 logger.exception("Can not load or resize image")
                 canvas.saveState()
-                canvas.setFillColorRGB(0.8, 0.8, 0.8, alpha=1)
+                canvas.setFillColorRGB(.8, .8, .8, alpha=1)
                 canvas.rect(
-                    x=float(o["left"]) * mm,
-                    y=float(o["bottom"]) * mm,
-                    width=float(o["width"]) * mm,
-                    height=float(o["height"]) * mm,
+                    x=float(o['left']) * mm,
+                    y=float(o['bottom']) * mm,
+                    width=float(o['width']) * mm,
+                    height=float(o['height']) * mm,
                     stroke=0,
                     fill=1,
                 )
                 canvas.restoreState()
         else:
             canvas.saveState()
-            canvas.setFillColorRGB(0.8, 0.8, 0.8, alpha=1)
+            canvas.setFillColorRGB(.8, .8, .8, alpha=1)
             canvas.rect(
-                x=float(o["left"]) * mm,
-                y=float(o["bottom"]) * mm,
-                width=float(o["width"]) * mm,
-                height=float(o["height"]) * mm,
+                x=float(o['left']) * mm,
+                y=float(o['bottom']) * mm,
+                width=float(o['width']) * mm,
+                height=float(o['height']) * mm,
                 stroke=0,
                 fill=1,
             )
             canvas.restoreState()
 
-    def _text_paragraph(
-        self,
-        op: OrderPosition,
-        order: Order,
-        o: dict,
-        legacy_lineheight=False,
-        override_fontsize=None,
-    ):
-        font = o["fontfamily"]
+    def _text_paragraph(self, op: OrderPosition, order: Order, o: dict, legacy_lineheight=False, override_fontsize=None):
+        font = o['fontfamily']
 
         # Since pdfmetrics.registerFont is global, we want to make sure that no one tries to sneak in a font, they
         # should not have access to.
         if font not in self.event_fonts:
             logger.warning(f'Unauthorized use of font "{font}"')
-            font = "Open Sans"
+            font = 'Open Sans'
 
-        if o["bold"]:
-            font += " B"
-        if o["italic"]:
-            font += " I"
+        if o['bold']:
+            font += ' B'
+        if o['italic']:
+            font += ' I'
 
-        fontsize = (
-            override_fontsize if override_fontsize is not None else float(o["fontsize"])
-        )
+        fontsize = override_fontsize if override_fontsize is not None else float(o['fontsize'])
         try:
             ad = getAscentDescent(font, fontsize)
         except KeyError:  # font not known, fall back
             logger.warning(f'Use of unknown font "{font}"')
-            font = "Open Sans"
+            font = 'Open Sans'
             ad = getAscentDescent(font, fontsize)
 
-        align_map = {"left": TA_LEFT, "center": TA_CENTER, "right": TA_RIGHT}
+        align_map = {
+            'left': TA_LEFT,
+            'center': TA_CENTER,
+            'right': TA_RIGHT
+        }
         # lineheight display differs from browser canvas. This calc is just empirical values to get
         # reportlab render similarly to browser canvas.
         # for backwards compatability use „uncorrected“ lineheight of 1.0 instead of 1.15
-        lineheight = (
-            float(o["lineheight"]) * 1.15
-            if not legacy_lineheight or "lineheight" in o
-            else 1.0
-        )
+        lineheight = float(o['lineheight']) * 1.15 if not legacy_lineheight or 'lineheight' in o else 1.0
         style = ParagraphStyle(
             name=uuid.uuid4().hex,
             fontName=font,
             fontSize=fontsize,
             leading=lineheight * fontsize,
             # for backwards compatability use autoLeading if no lineheight is given
-            autoLeading="off" if not legacy_lineheight or "lineheight" in o else "max",
-            textColor=Color(
-                o["color"][0] / 255, o["color"][1] / 255, o["color"][2] / 255
-            ),
-            alignment=align_map[o["align"]],
-            splitLongWords=o.get("splitlongwords", True),
+            autoLeading='off' if not legacy_lineheight or 'lineheight' in o else 'max',
+            textColor=Color(o['color'][0] / 255, o['color'][1] / 255, o['color'][2] / 255),
+            alignment=align_map[o['align']],
+            splitLongWords=o.get('splitlongwords', True),
         )
+        # add an almost-invisible space &hairsp; after hyphens as word-wrap in ReportLab only works on space chars
         text = conditional_escape(
             self._get_text_content(op, order, o) or "",
-        ).replace("\n", "<br/>\n")
+        ).replace("\n", "<br/>\n").replace("-", "-&hairsp;")
 
         # reportlab does not support unicode combination characters
         # It's important we do this before we use ArabicReshaper
@@ -1473,85 +1041,69 @@ class Renderer:
         # reportlab does not support RTL, ligature-heavy scripts like Arabic. Therefore, we use ArabicReshaper
         # to resolve all ligatures and python-bidi to switch RTL texts.
         try:
-            text = "<br/>".join(
-                get_display(reshaper.reshape(l)) for l in text.split("<br/>")
-            )
+            text = "<br/>".join(get_display(reshaper.reshape(l)) for l in text.split("<br/>"))
         except:
-            logger.exception(
-                "Reshaping/Bidi fixes failed on string {}".format(repr(text))
-            )
+            logger.exception('Reshaping/Bidi fixes failed on string {}'.format(repr(text)))
 
         p = Paragraph(text, style=style)
         return p, ad, lineheight
 
-    def _draw_textcontainer(
-        self, canvas: Canvas, op: OrderPosition, order: Order, o: dict
-    ):
-        fontsize = float(o["fontsize"])
-        height = float(o["height"]) * mm
-        width = float(o["width"]) * mm
+    def _draw_textcontainer(self, canvas: Canvas, op: OrderPosition, order: Order, o: dict):
+        fontsize = float(o['fontsize'])
+        height = float(o['height']) * mm
+        width = float(o['width']) * mm
         while True:
-            p, ad, lineheight = self._text_paragraph(
-                op, order, o, override_fontsize=fontsize
-            )
+            p, ad, lineheight = self._text_paragraph(op, order, o, override_fontsize=fontsize)
             w, h = p.wrapOn(canvas, width, 1000 * mm)
             widths = p.getActualLineWidths0()
             if not widths:
                 break
             actual_w = max(widths)
-            if (
-                not o.get("autoresize", False)
-                or (h <= height and actual_w <= width)
-                or fontsize <= 1.0
-            ):
+            if not o.get('autoresize', False) or (h <= height and actual_w <= width) or fontsize <= 1.0:
                 break
             if h > height:  # we can do larger steps for height
-                fontsize -= max(1.0, fontsize * 0.1)
+                fontsize -= max(1.0, fontsize * .1)
             else:
-                fontsize -= max(0.25, fontsize * 0.025)
+                fontsize -= max(.25, fontsize * .025)
 
         canvas.saveState()
         # The ascent/descent offsets here are not really proven to be correct, they're just empirical values to get
         # reportlab render similarly to browser canvas.
-        canvas.translate(float(o["left"]) * mm, float(o["bottom"]) * mm + height)
-        canvas.rotate(o.get("rotation", 0) * -1)
-        if o.get("verticalalign", "top") == "top":
-            p.drawOn(canvas, 0, -h)
-        elif o.get("verticalalign", "top") == "middle":
+        canvas.translate(float(o['left']) * mm, float(o['bottom']) * mm + height)
+        canvas.rotate(o.get('rotation', 0) * -1)
+        if o.get('verticalalign', 'top') == 'top':
+            p.drawOn(canvas, 0, - h)
+        elif o.get('verticalalign', 'top') == 'middle':
             p.drawOn(canvas, 0, (-height - h) / 2)
-        elif o.get("verticalalign", "top") == "bottom":
+        elif o.get('verticalalign', 'top') == 'bottom':
             p.drawOn(canvas, 0, -height)
         canvas.restoreState()
 
     def _draw_textarea(self, canvas: Canvas, op: OrderPosition, order: Order, o: dict):
         p, ad, lineheight = self._text_paragraph(op, order, o, legacy_lineheight=True)
-        w, h = p.wrapOn(canvas, float(o["width"]) * mm, 1000 * mm)
+        w, h = p.wrapOn(canvas, float(o['width']) * mm, 1000 * mm)
         # p_size = p.wrap(float(o['width']) * mm, 1000 * mm)
         canvas.saveState()
         # The ascent/descent offsets here are not really proven to be correct, they're just empirical values to get
         # reportlab render similarly to browser canvas.
-        if o.get("downward", False):
-            canvas.translate(float(o["left"]) * mm, float(o["bottom"]) * mm)
-            canvas.rotate(o.get("rotation", 0) * -1)
+        if o.get('downward', False):
+            canvas.translate(float(o['left']) * mm, float(o['bottom']) * mm)
+            canvas.rotate(o.get('rotation', 0) * -1)
             p.drawOn(canvas, 0, -h - ad[1] / 2.5)
         else:
             if lineheight != 1.0:
                 # lineheight adds to ascent/descent offsets, just empirical values again to get
                 # reportlab to render similarly to browser canvas
-                ad = (ad[0], ad[1] + (lineheight - 1.0) * float(o["fontsize"]) * 1.05)
-            canvas.translate(float(o["left"]) * mm, float(o["bottom"]) * mm + h)
-            canvas.rotate(o.get("rotation", 0) * -1)
+                ad = (
+                    ad[0],
+                    ad[1] + (lineheight - 1.0) * float(o['fontsize']) * 1.05
+                )
+            canvas.translate(float(o['left']) * mm, float(o['bottom']) * mm + h)
+            canvas.rotate(o.get('rotation', 0) * -1)
             p.drawOn(canvas, 0, -h - ad[1])
         canvas.restoreState()
 
-    def draw_page(
-        self,
-        canvas: Canvas,
-        order: Order,
-        op: OrderPosition,
-        show_page=True,
-        only_page=None,
-    ):
+    def draw_page(self, canvas: Canvas, order: Order, op: OrderPosition, show_page=True, only_page=None):
         page_count = len(self.bg_pdf.pages)
 
         if not only_page and not show_page:
@@ -1561,44 +1113,42 @@ class Renderer:
             if only_page and only_page != page + 1:
                 continue
             for o in self.layout:
-                if o.get("page", 1) != page + 1:
+                if o.get('page', 1) != page + 1:
                     continue
-                if o["type"] == "barcodearea":
+                if o['type'] == "barcodearea":
                     self._draw_barcodearea(canvas, op, order, o)
-                elif o["type"] == "imagearea":
+                elif o['type'] == "imagearea":
                     self._draw_imagearea(canvas, op, order, o)
-                elif o["type"] == "textcontainer":
+                elif o['type'] == "textcontainer":
                     self._draw_textcontainer(canvas, op, order, o)
-                elif o["type"] == "textarea":
+                elif o['type'] == "textarea":
                     self._draw_textarea(canvas, op, order, o)
-                elif o["type"] == "poweredby":
+                elif o['type'] == "poweredby":
                     self._draw_poweredby(canvas, op, o)
                 if self.bg_pdf:
                     page_size = (
-                        self.bg_pdf.pages[0].mediabox[2]
-                        - self.bg_pdf.pages[0].mediabox[0],
-                        self.bg_pdf.pages[0].mediabox[3]
-                        - self.bg_pdf.pages[0].mediabox[1],
+                        self.bg_pdf.pages[0].mediabox[2] - self.bg_pdf.pages[0].mediabox[0],
+                        self.bg_pdf.pages[0].mediabox[3] - self.bg_pdf.pages[0].mediabox[1]
                     )
-                    if self.bg_pdf.pages[0].get("/Rotate") in (90, 270):
+                    if self.bg_pdf.pages[0].get('/Rotate') in (90, 270):
                         # swap dimensions due to pdf being rotated
                         page_size = page_size[::-1]
                     canvas.setPageSize(page_size)
             if show_page:
                 canvas.showPage()
 
-    def render_background(self, buffer, title=_("Ticket")):
+    def render_background(self, buffer, title=_('Ticket')):
         buffer.seek(0)
         fg_pdf = PdfReader(buffer)
 
         if settings.PDFTK:
             with tempfile.TemporaryDirectory() as d:
-                fg_filename = os.path.join(d, "fg.pdf")
-                bg_filename = os.path.join(d, "bg.pdf")
-                out_filename = os.path.join(d, "out.pdf")
+                fg_filename = os.path.join(d, 'fg.pdf')
+                bg_filename = os.path.join(d, 'bg.pdf')
+                out_filename = os.path.join(d, 'out.pdf')
 
                 buffer.seek(0)
-                with open(fg_filename, "wb") as f:
+                with open(fg_filename, 'wb') as f:
                     f.write(buffer.read())
                 # pdf_header is a string like "%pdf-X.X"
                 if float(self.bg_pdf.pdf_header[5:]) > float(fg_pdf.pdf_header[5:]):
@@ -1616,7 +1166,7 @@ class Renderer:
                         self.bg_pdf,
                         pages=(0, min(bg_num_pages, fg_num_pages)),
                         import_outline=False,
-                        excluded_fields=("/Annots", "/B"),
+                        excluded_fields=("/Annots", "/B")
                     )
                     if fg_num_pages > bg_num_pages:
                         # repeat last page in bg_pdf to match fg_pdf
@@ -1624,26 +1174,31 @@ class Renderer:
                             bg_pdf_to_merge,
                             pages=[bg_num_pages - 1] * (fg_num_pages - bg_num_pages),
                             import_outline=False,
-                            excluded_fields=("/Annots", "/B"),
+                            excluded_fields=("/Annots", "/B")
                         )
 
                     bg_pdf_to_merge.write(bg_filename)
 
-                    pdftk_cmd = [settings.PDFTK, bg_filename, "multistamp", fg_filename]
+                    pdftk_cmd = [
+                        settings.PDFTK,
+                        bg_filename,
+                        'multistamp',
+                        fg_filename
+                    ]
 
                 else:
-                    with open(bg_filename, "wb") as f:
+                    with open(bg_filename, 'wb') as f:
                         f.write(self.bg_bytes)
                     pdftk_cmd = [
                         settings.PDFTK,
                         fg_filename,
-                        "multibackground",
-                        bg_filename,
+                        'multibackground',
+                        bg_filename
                     ]
 
-                pdftk_cmd.extend(("output", out_filename, "compress"))
+                pdftk_cmd.extend(('output', out_filename, 'compress'))
                 subprocess.run(pdftk_cmd, check=True)
-                with open(out_filename, "rb") as f:
+                with open(out_filename, 'rb') as f:
                     return BytesIO(f.read())
         else:
             output = PdfWriter()
@@ -1658,12 +1213,10 @@ class Renderer:
             if float(self.bg_pdf.pdf_header[5:]) > float(fg_pdf.pdf_header[5:]):
                 output.pdf_header = self.bg_pdf.pdf_header
 
-            output.add_metadata(
-                {
-                    "/Title": str(title),
-                    "/Creator": "pretix",
-                }
-            )
+            output.add_metadata({
+                '/Title': str(title),
+                '/Creator': 'pretix',
+            })
             outbuffer = BytesIO()
             output.write(outbuffer)
             outbuffer.seek(0)
@@ -1673,8 +1226,8 @@ class Renderer:
 def merge_background(fg_pdf: PdfWriter, bg_pdf: PdfWriter, out_file, compress):
     if settings.PDFTK:
         with tempfile.TemporaryDirectory() as d:
-            fg_filename = os.path.join(d, "fg.pdf")
-            bg_filename = os.path.join(d, "bg.pdf")
+            fg_filename = os.path.join(d, 'fg.pdf')
+            bg_filename = os.path.join(d, 'bg.pdf')
 
             # pdf_header is a string like "%pdf-X.X"
             if float(bg_pdf.pdf_header[5:]) > float(fg_pdf.pdf_header[5:]):
@@ -1692,7 +1245,7 @@ def merge_background(fg_pdf: PdfWriter, bg_pdf: PdfWriter, out_file, compress):
                         bg_pdf,
                         pages=[bg_num_pages - 1] * (fg_num_pages - bg_num_pages),
                         import_outline=False,
-                        excluded_fields=("/Annots", "/B"),
+                        excluded_fields=("/Annots", "/B")
                     )
 
                 bg_pdf.write(bg_filename)
@@ -1700,20 +1253,20 @@ def merge_background(fg_pdf: PdfWriter, bg_pdf: PdfWriter, out_file, compress):
                 pdftk_cmd = [
                     settings.PDFTK,
                     bg_filename,
-                    "multistamp",
+                    'multistamp',
                     fg_filename,
                 ]
             else:
                 pdftk_cmd = [
                     settings.PDFTK,
                     fg_filename,
-                    "multibackground",
-                    bg_filename,
+                    'multibackground',
+                    bg_filename
                 ]
 
-            pdftk_cmd.extend(("output", "-"))
+            pdftk_cmd.extend(('output', '-'))
             if compress:
-                pdftk_cmd.append("compress")
+                pdftk_cmd.append('compress')
 
             fg_pdf.write(fg_filename)
             bg_pdf.write(bg_filename)
@@ -1746,14 +1299,12 @@ def _correct_page_media_box(page: pypdf.PageObject):
             rr = pypdf.generic.RectangleObject(page[b])
             pt1 = trsf.apply_on(rr.lower_left)
             pt2 = trsf.apply_on(rr.upper_right)
-            page[pypdf.generic.NameObject(b)] = pypdf.generic.RectangleObject(
-                (
-                    min(pt1[0], pt2[0]),
-                    min(pt1[1], pt2[1]),
-                    max(pt1[0], pt2[0]),
-                    max(pt1[1], pt2[1]),
-                )
-            )
+            page[pypdf.generic.NameObject(b)] = pypdf.generic.RectangleObject((
+                min(pt1[0], pt2[0]),
+                min(pt1[1], pt2[1]),
+                max(pt1[0], pt2[0]),
+                max(pt1[1], pt2[1]),
+            ))
 
 
 @deconstructible
@@ -1765,15 +1316,13 @@ class PdfLayoutValidator:
             try:
                 val = json.loads(value)
             except ValueError:
-                raise ValidationError(_("Your layout file is not a valid JSON file."))
+                raise ValidationError(_('Your layout file is not a valid JSON file.'))
         else:
             val = value
-        with open(finders.find("schema/pdf-layout.schema.json"), "r") as f:
+        with open(finders.find('schema/pdf-layout.schema.json'), 'r') as f:
             schema = json.loads(f.read())
         try:
             jsonschema.validate(val, schema)
         except jsonschema.ValidationError as e:
-            e = str(e).replace("%", "%%")
-            raise ValidationError(
-                _("Your layout file is not a valid layout. Error message: {}").format(e)
-            )
+            e = str(e).replace('%', '%%')
+            raise ValidationError(_('Your layout file is not a valid layout. Error message: {}').format(e))
